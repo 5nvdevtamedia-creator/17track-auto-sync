@@ -380,12 +380,57 @@ async function extractPageData(page, expectedCodes, scrollStep) {
       return {
         items: results,
         totalCards: cards.length,
+        hasDemoCard,
         pageSpinners,
         hasRateLimitMessage,
+        pageTitle: document.title || '',
+        bodySnippet: ((document.body && document.body.innerText) || '').replace(/\s+/g, ' ').slice(0, 180),
       };
     },
     { cardSel: CARD_SELECTOR, codes: expectedCodes, step: scrollStep }
   );
+}
+
+async function dismissTutorialCompletely(page) {
+  for (let step = 0; step < 6; step++) {
+    try {
+      const acted = await page.evaluate(() => {
+        const buttons = Array.from(document.querySelectorAll('button'));
+        for (const btn of buttons) {
+          const txt = (btn.textContent || '').trim();
+          if (/^(finish|skip|got it)$/i.test(txt)) {
+            btn.click();
+            return 'finish';
+          }
+        }
+        for (const btn of buttons) {
+          const txt = (btn.textContent || '').trim();
+          if (/^next$/i.test(txt)) {
+            btn.click();
+            return 'next';
+          }
+        }
+        return null;
+      });
+      if (!acted) break;
+      await sleep(700);
+    } catch (e) {
+      break;
+    }
+  }
+}
+
+async function warmup17TrackSession(browser, proxyConfig) {
+  const page = await createConfiguredPage(browser, proxyConfig);
+  try {
+    console.log('🔧 Đang khởi tạo phiên 17track & đóng bảng hướng dẫn 4 bước...');
+    await page.goto('https://t.17track.net/en', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
+    await sleep(3000);
+    await dismissTutorialCompletely(page);
+    await sleep(800);
+  } finally {
+    await page.close().catch(() => {});
+  }
 }
 
 async function clickOrangeTrackOnPage(page) {
@@ -421,10 +466,14 @@ async function runFirstPass(browser, proxyConfig, batch) {
   let lastData = [];
   let lastTotalCards = 0;
   let lastHasRateLimit = false;
+  let lastPageTitle = '';
+  let lastBodySnippet = '';
 
   try {
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
-    await sleep(3500);
+    await sleep(3000);
+    await dismissTutorialCompletely(page);
+    await sleep(1000);
 
     const start = Date.now();
     let prevRealCount = -1;
@@ -440,7 +489,15 @@ async function runFirstPass(browser, proxyConfig, batch) {
 
       lastData = resp.items || [];
       lastTotalCards = resp.totalCards || 0;
+      lastPageTitle = resp.pageTitle || '';
+      lastBodySnippet = resp.bodySnippet || '';
       lastHasRateLimit = Boolean(resp.hasRateLimitMessage || lastData.some((it) => it.isRateLimited));
+
+      // Nếu vẫn đang ở thẻ mẫu TestNumber00017 -> Đóng nốt hướng dẫn và bấm nút cam TRACK
+      if (resp.hasDemoCard && lastData.length === 0) {
+        await dismissTutorialCompletely(page);
+        await clickOrangeTrackOnPage(page);
+      }
 
       const realFound = lastData.filter(isRealTrackedItem);
       const querying = lastData.filter((it) => it.isQuerying);
@@ -456,12 +513,20 @@ async function runFirstPass(browser, proxyConfig, batch) {
         return {
           data: (finalResp && finalResp.items) || lastData,
           totalCards: lastTotalCards,
+          pageTitle: lastPageTitle,
+          bodySnippet: lastBodySnippet,
           hasRateLimitMessage: false,
         };
       }
 
       if (lastHasRateLimit && realFound.length === 0 && elapsed >= 4500) {
-        return { data: lastData, totalCards: lastTotalCards, hasRateLimitMessage: true };
+        return {
+          data: lastData,
+          totalCards: lastTotalCards,
+          pageTitle: lastPageTitle,
+          bodySnippet: lastBodySnippet,
+          hasRateLimitMessage: true,
+        };
       }
 
       if (lastData.length >= batch.length && querying.length === 0 && resp.pageSpinners === 0) {
@@ -472,7 +537,13 @@ async function runFirstPass(browser, proxyConfig, batch) {
           stableTicks++;
         }
         if (elapsed >= 11000 && stableTicks >= 3) {
-          return { data: lastData, totalCards: lastTotalCards, hasRateLimitMessage: lastHasRateLimit };
+          return {
+            data: lastData,
+            totalCards: lastTotalCards,
+            pageTitle: lastPageTitle,
+            bodySnippet: lastBodySnippet,
+            hasRateLimitMessage: lastHasRateLimit,
+          };
         }
       } else {
         if (realFound.length > prevRealCount) prevRealCount = realFound.length;
@@ -482,7 +553,13 @@ async function runFirstPass(browser, proxyConfig, batch) {
       await sleep(1600);
     }
 
-    return { data: lastData, totalCards: lastTotalCards, hasRateLimitMessage: lastHasRateLimit };
+    return {
+      data: lastData,
+      totalCards: lastTotalCards,
+      pageTitle: lastPageTitle,
+      bodySnippet: lastBodySnippet,
+      hasRateLimitMessage: lastHasRateLimit,
+    };
   } finally {
     await page.close().catch(() => {});
   }
@@ -623,6 +700,9 @@ async function processBatch(browser, proxyConfig, batch, batchLabel) {
   console.log(
     `📊 Lượt đầu ${batchLabel}: ${realAfterFirst}/${batch.length} đơn có trạng thái thật (tổng thẻ DOM: ${firstRes.totalCards || 0}, rateLimit: ${firstRes.hasRateLimitMessage}).`
   );
+  if (realAfterFirst === 0 && (firstRes.totalCards || 0) <= 1) {
+    console.log(`🔎 Chẩn đoán trang: title="${firstRes.pageTitle || ''}" | text="${firstRes.bodySnippet || ''}"`);
+  }
 
   const missingCodes = batch.filter((c) => !isRealTrackedItem(dataMap.get(c.trim().toUpperCase())));
   if (missingCodes.length === 0) {
@@ -689,6 +769,8 @@ async function main() {
   });
 
   try {
+    await warmup17TrackSession(browser, proxyConfig);
+
     while (cursor < allNums.length) {
       // Kiểm tra giới hạn an toàn 5 giờ của GitHub Actions trước khi chạy lô mới
       if (Date.now() - runStartTime >= MAX_RUN_MS) {
