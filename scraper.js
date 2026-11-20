@@ -377,6 +377,9 @@ async function extractPageData(page, expectedCodes, scrollStep) {
         }
       }
 
+      const firstCardSample =
+        cards.length > 0 ? (cards[0].textContent || '').replace(/\s+/g, ' ').trim().slice(0, 220) : '';
+
       return {
         items: results,
         totalCards: cards.length,
@@ -385,6 +388,7 @@ async function extractPageData(page, expectedCodes, scrollStep) {
         hasRateLimitMessage,
         pageTitle: document.title || '',
         bodySnippet: ((document.body && document.body.innerText) || '').replace(/\s+/g, ' ').slice(0, 180),
+        firstCardSample,
       };
     },
     { cardSel: CARD_SELECTOR, codes: expectedCodes, step: scrollStep }
@@ -468,6 +472,7 @@ async function runFirstPass(browser, proxyConfig, batch) {
   let lastHasRateLimit = false;
   let lastPageTitle = '';
   let lastBodySnippet = '';
+  let lastFirstCardSample = '';
 
   try {
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
@@ -491,6 +496,7 @@ async function runFirstPass(browser, proxyConfig, batch) {
       lastTotalCards = resp.totalCards || 0;
       lastPageTitle = resp.pageTitle || '';
       lastBodySnippet = resp.bodySnippet || '';
+      lastFirstCardSample = resp.firstCardSample || '';
       lastHasRateLimit = Boolean(resp.hasRateLimitMessage || lastData.some((it) => it.isRateLimited));
 
       // Nếu vẫn đang ở thẻ mẫu TestNumber00017 -> Đóng nốt hướng dẫn và bấm nút cam TRACK
@@ -542,6 +548,7 @@ async function runFirstPass(browser, proxyConfig, batch) {
             totalCards: lastTotalCards,
             pageTitle: lastPageTitle,
             bodySnippet: lastBodySnippet,
+            firstCardSample: lastFirstCardSample,
             hasRateLimitMessage: lastHasRateLimit,
           };
         }
@@ -558,6 +565,7 @@ async function runFirstPass(browser, proxyConfig, batch) {
       totalCards: lastTotalCards,
       pageTitle: lastPageTitle,
       bodySnippet: lastBodySnippet,
+      firstCardSample: lastFirstCardSample,
       hasRateLimitMessage: lastHasRateLimit,
     };
   } finally {
@@ -700,8 +708,9 @@ async function processBatch(browser, proxyConfig, batch, batchLabel) {
   console.log(
     `📊 Lượt đầu ${batchLabel}: ${realAfterFirst}/${batch.length} đơn có trạng thái thật (tổng thẻ DOM: ${firstRes.totalCards || 0}, rateLimit: ${firstRes.hasRateLimitMessage}).`
   );
-  if (realAfterFirst === 0 && (firstRes.totalCards || 0) <= 1) {
-    console.log(`🔎 Chẩn đoán trang: title="${firstRes.pageTitle || ''}" | text="${firstRes.bodySnippet || ''}"`);
+  if (realAfterFirst === 0) {
+    console.log(`🔎 Mẫu thẻ #1 thực tế: "${firstRes.firstCardSample || '(trống)'}"`);
+    console.log(`🔎 Tiêu đề trang: "${firstRes.pageTitle || ''}"`);
   }
 
   const missingCodes = batch.filter((c) => !isRealTrackedItem(dataMap.get(c.trim().toUpperCase())));
