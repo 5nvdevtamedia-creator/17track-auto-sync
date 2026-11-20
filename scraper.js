@@ -389,27 +389,41 @@ async function extractPageData(page, expectedCodes, scrollStep) {
 }
 
 async function clickOrangeTrackOnPage(page) {
-  await page.evaluate(() => {
-    const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
-    for (const btn of buttons) {
-      const txt = (btn.textContent || '').replace(/\s+/g, ' ').trim();
-      if (/^track(\s*\(\d+\))?$/i.test(txt)) {
-        btn.click();
-        return true;
+  try {
+    return await page.evaluate(() => {
+      const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
+      for (const btn of buttons) {
+        const txt = (btn.textContent || '').replace(/\s+/g, ' ').trim();
+        if (/^track(\s*\(\d+\))?$/i.test(txt)) {
+          btn.click();
+          return true;
+        }
       }
-    }
+      return false;
+    });
+  } catch (e) {
     return false;
-  });
+  }
+}
+
+async function safeExtractPageData(page, expectedCodes, scrollStep) {
+  try {
+    return await extractPageData(page, expectedCodes, scrollStep);
+  } catch (e) {
+    // Bỏ qua lỗi "Execution context was destroyed" khi trang 17track vừa tự chuyển hướng/nạp lại
+    return null;
+  }
 }
 
 async function runFirstPass(browser, proxyConfig, batch) {
   const url = `https://t.17track.net/en#nums=${batch.join(',')}`;
   const page = await createConfiguredPage(browser, proxyConfig);
   let lastData = [];
+  let lastTotalCards = 0;
   let lastHasRateLimit = false;
 
   try {
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
     await sleep(3500);
 
     const start = Date.now();
@@ -418,8 +432,14 @@ async function runFirstPass(browser, proxyConfig, batch) {
     let scrollStep = 0;
 
     while (Date.now() - start < PER_ATTEMPT_TIMEOUT_MS) {
-      const resp = await extractPageData(page, batch, scrollStep++);
+      const resp = await safeExtractPageData(page, batch, scrollStep++);
+      if (!resp) {
+        await sleep(1600);
+        continue;
+      }
+
       lastData = resp.items || [];
+      lastTotalCards = resp.totalCards || 0;
       lastHasRateLimit = Boolean(resp.hasRateLimitMessage || lastData.some((it) => it.isRateLimited));
 
       const realFound = lastData.filter(isRealTrackedItem);
@@ -432,12 +452,16 @@ async function runFirstPass(browser, proxyConfig, batch) {
 
       if (realFound.length >= batch.length && querying.length === 0) {
         await sleep(300);
-        const finalResp = await extractPageData(page, batch, scrollStep);
-        return { data: finalResp.items || lastData, hasRateLimitMessage: false };
+        const finalResp = await safeExtractPageData(page, batch, scrollStep);
+        return {
+          data: (finalResp && finalResp.items) || lastData,
+          totalCards: lastTotalCards,
+          hasRateLimitMessage: false,
+        };
       }
 
       if (lastHasRateLimit && realFound.length === 0 && elapsed >= 4500) {
-        return { data: lastData, hasRateLimitMessage: true };
+        return { data: lastData, totalCards: lastTotalCards, hasRateLimitMessage: true };
       }
 
       if (lastData.length >= batch.length && querying.length === 0 && resp.pageSpinners === 0) {
@@ -448,7 +472,7 @@ async function runFirstPass(browser, proxyConfig, batch) {
           stableTicks++;
         }
         if (elapsed >= 11000 && stableTicks >= 3) {
-          return { data: lastData, hasRateLimitMessage: lastHasRateLimit };
+          return { data: lastData, totalCards: lastTotalCards, hasRateLimitMessage: lastHasRateLimit };
         }
       } else {
         if (realFound.length > prevRealCount) prevRealCount = realFound.length;
@@ -458,7 +482,7 @@ async function runFirstPass(browser, proxyConfig, batch) {
       await sleep(1600);
     }
 
-    return { data: lastData, hasRateLimitMessage: lastHasRateLimit };
+    return { data: lastData, totalCards: lastTotalCards, hasRateLimitMessage: lastHasRateLimit };
   } finally {
     await page.close().catch(() => {});
   }
@@ -477,7 +501,7 @@ async function retryNotFoundWithAnchor(browser, proxyConfig, notFoundCodes) {
   let lastHasRateLimit = false;
 
   try {
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
     await sleep(3000);
 
     const start = Date.now();
@@ -486,7 +510,12 @@ async function retryNotFoundWithAnchor(browser, proxyConfig, notFoundCodes) {
     let scrollStep = 0;
 
     while (Date.now() - start < 24000) {
-      const resp = await extractPageData(page, combinedCodes, scrollStep++);
+      const resp = await safeExtractPageData(page, combinedCodes, scrollStep++);
+      if (!resp) {
+        await sleep(1500);
+        continue;
+      }
+
       lastData = resp.items || [];
       const querying = lastData.filter((it) => it.isQuerying);
       const hasRateLimit = Boolean(resp.hasRateLimitMessage || lastData.some((it) => it.isRateLimited));
@@ -512,10 +541,12 @@ async function retryNotFoundWithAnchor(browser, proxyConfig, notFoundCodes) {
           clickedSecondTry = true;
           await clickOrangeTrackOnPage(page);
           await sleep(5500);
-          const finalResp = await extractPageData(page, combinedCodes, scrollStep);
-          lastData = finalResp.items || lastData;
+          const finalResp = await safeExtractPageData(page, combinedCodes, scrollStep);
+          if (finalResp && Array.isArray(finalResp.items)) {
+            lastData = finalResp.items;
+          }
           const finalRateLimit = Boolean(
-            finalResp.hasRateLimitMessage || lastData.some((it) => it.isRateLimited)
+            (finalResp && finalResp.hasRateLimitMessage) || lastData.some((it) => it.isRateLimited)
           );
           return {
             anchorHasStatus: !finalRateLimit,
@@ -587,6 +618,11 @@ async function processBatch(browser, proxyConfig, batch, batchLabel) {
   console.log(`🚀 Đang chạy ${batchLabel} (${batch.length} đơn)...`);
   const firstRes = await runFirstPass(browser, proxyConfig, batch);
   saveRecovered(firstRes.data);
+
+  const realAfterFirst = batch.filter((c) => isRealTrackedItem(dataMap.get(c.trim().toUpperCase()))).length;
+  console.log(
+    `📊 Lượt đầu ${batchLabel}: ${realAfterFirst}/${batch.length} đơn có trạng thái thật (tổng thẻ DOM: ${firstRes.totalCards || 0}, rateLimit: ${firstRes.hasRateLimitMessage}).`
+  );
 
   const missingCodes = batch.filter((c) => !isRealTrackedItem(dataMap.get(c.trim().toUpperCase())));
   if (missingCodes.length === 0) {
