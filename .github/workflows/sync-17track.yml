@@ -1,0 +1,63 @@
+name: 17TRACK Auto Sync Sheet
+
+on:
+  # Tự động chạy mỗi 6 tiếng: 00:00, 06:00, 12:00, 18:00 giờ Việt Nam (UTC+7)
+  schedule:
+    - cron: '0 17,23,5,11 * * *'
+  # Cho phép bấm chạy thủ công bất cứ lúc nào trên tab Actions của GitHub
+  workflow_dispatch:
+    inputs:
+      reset_cursor:
+        description: 'Chạy lại từ đầu (true = chạy từ dòng 2, false = chạy nối tiếp lô đang dở)'
+        required: false
+        default: 'false'
+      batch_interval_minutes:
+        description: 'Số phút nghỉ giữa 2 lô (mặc định 6 phút)'
+        required: false
+        default: '6'
+
+# Chống 2 phiên chạy đè lên nhau
+concurrency:
+  group: 17track-auto-sync
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  sync-17track:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run 17TRACK Scraper
+        env:
+          SHEET_WEBHOOK_URL: ${{ secrets.SHEET_WEBHOOK_URL }}
+          PROXY_URL: ${{ secrets.PROXY_URL }}
+          SPREADSHEET_ID: '1EWJzWcNn-a6mYnf_M2EZAky4iIgfPJEVy1k8znSFjZo'
+          TARGET_GID: '603702674'
+          BATCH_INTERVAL_MINUTES: ${{ github.event.inputs.batch_interval_minutes || '6' }}
+          MAX_RUN_MINUTES: '300'
+          RESET_CURSOR: ${{ github.event.inputs.reset_cursor || 'false' }}
+        run: node scraper.js
+
+      - name: Save checkpoint (.state/cursor.json)
+        if: always()
+        run: |
+          if [ -f .state/cursor.json ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add .state/cursor.json
+            git diff --cached --quiet || (git commit -m "chore: update 17track sync checkpoint [skip ci]" && git pull --rebase && git push)
+          fi

@@ -1,0 +1,12 @@
+node_modules/
+results.json
+.env
+*.log
+
+# Giữ kín các file nội bộ chứa link Apps Script khi đẩy lên Public repo
+chrome-extension/
+google-apps-script.gs
+f12-console-script.js
+generate-icons.js
+sample-5-items.html
+setup-auto-12am.bat
